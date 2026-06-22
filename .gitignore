@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.venv/
+env/
+.pytest_cache/
+
+# Node
+node_modules/
+dist/
+build/
+.next/
+
+# OS/IDE
+.DS_Store
+.idea/
+.vscode/
+
+# Secrets
+.env
+*.pem
+
+.gitnexus/
+.claude
+AGENTS.md
+CLAUDE.md
+.agents/

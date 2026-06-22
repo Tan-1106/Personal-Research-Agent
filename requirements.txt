@@ -1,0 +1,15 @@
+# AI
+langchain>=0.3.0
+langgraph
+langchain-google-genai
+google-generativeai
+
+# Web scraping
+beautifulsoup4
+requests
+
+# Database
+psycopg[binary]
+
+# Environment variables
+python-dotenv
