@@ -1,10 +1,12 @@
 # AI
 langchain>=0.3.0
 langgraph
+langchain-community
 langchain-google-genai
 google-generativeai
 
 # Web scraping
+tavily-python
 beautifulsoup4
 requests
 
