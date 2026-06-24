@@ -1,7 +1,7 @@
 # AI
 langchain>=0.3.0
 langgraph
-langchain-community
+langchain-tavily
 langchain-google-genai
 google-generativeai
 
@@ -15,3 +15,6 @@ psycopg[binary]
 
 # Environment variables
 python-dotenv
+
+# Bot
+python-telegram-bot

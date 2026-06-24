@@ -1,12 +1,12 @@
 import os
-from typing                                     import Dict, Any
+from typing                                     import Dict, Any, List
 from pydantic                                   import BaseModel, Field
 from concurrent.futures                         import ThreadPoolExecutor
 from src.graph.state                            import AgentState
 from src.utils.scraper_tools                    import scrape_text_from_url
 from langchain_core.messages                    import SystemMessage, HumanMessage
 from langchain_google_genai                     import ChatGoogleGenerativeAI
-from langchain_community.tools.tavily_search    import TavilySearchResults
+from langchain_tavily                           import TavilySearch
 
 
 def scraper_node(state: AgentState) -> Dict[str, Any]:
@@ -21,12 +21,12 @@ def scraper_node(state: AgentState) -> Dict[str, Any]:
     print(f"    - Querying internet for: '{user_input}'")
     
     # Initialize Tavily search tool (returns top 3 most relevant results)
-    search_tool = TavilySearchResults(max_results=3)
+    search_tool = TavilySearch(max_results=3)
     
     try:
         # Perform the search and extract URLs
         search_results = search_tool.invoke({"query": user_input})
-        found_urls = [res["url"] for res in search_results]
+        found_urls = [res["url"] for res in search_results.get("results", [])]
     except Exception as e:
         print(f"    - Search failed: {e}")
         found_urls = []
@@ -57,7 +57,6 @@ def scraper_node(state: AgentState) -> Dict[str, Any]:
     }
     
     
-
 class ArticleEvaluation(BaseModel):
     # 1. Define the Pydantic schema for the LLM's evaluation output
     is_relevant: bool = Field(
@@ -65,6 +64,15 @@ class ArticleEvaluation(BaseModel):
     )
     reason: str = Field(
         description="A short, 1-sentence explanation for why it was kept or discarded."
+    )
+ 
+
+class UserPreferences(BaseModel):
+    topics_to_follow: List[str] = Field(
+        description="List of topics the user wants to prioritize or follow."
+    )
+    topics_to_block: List[str] = Field(
+        description="List of topics the user explicitly wants to avoid or block."
     )
 
 
@@ -191,10 +199,9 @@ def editor_node(state: AgentState) -> Dict[str, Any]:
     # Combine all individual reports into a single string for the LLM
     combined_reports = "\n\n".join(analyzed_reports)
     
-    # We use Gemini 2.5 Pro for the final synthesis to ensure premium writing quality
     # The temperature is slightly higher (0.4) to allow for more creative writing
     llm = ChatGoogleGenerativeAI(
-        model="gemini-2.5-pro",
+        model="gemini-2.5-flash",
         temperature=0.4
     )
     
@@ -217,3 +224,73 @@ def editor_node(state: AgentState) -> Dict[str, Any]:
         
     # Update state with the final synthesized report
     return {"final_digest": final_digest}
+
+
+def config_node(state: AgentState) -> Dict[str, Any]:
+    """
+    Updates the user's long-term research preferences (follows and blocks).
+    """
+    print("--> [Config Node] Updating user preferences...")
+    user_input = state.get("user_input", "")
+    current_prefs = state.get("user_preferences", {})
+    
+    # We use Flash-lite as this is a fast JSON extraction task
+    llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash-lite", temperature=0.0)
+    structured_llm = llm.with_structured_output(UserPreferences)
+    
+    system_prompt = (
+        "Extract the user's research preferences from their message. "
+        f"Their current preferences are: {current_prefs}. "
+        "Update the list of followed and blocked topics based on their new request. "
+        "Return the updated full list."
+    )
+    
+    messages = [
+        SystemMessage(content=system_prompt), 
+        HumanMessage(content=user_input)
+    ]
+    
+    try:
+        result = structured_llm.invoke(messages)
+        new_prefs = {
+            "followed": result.topics_to_follow,
+            "blocked": result.topics_to_block
+        }
+        
+        followed_str = ", ".join(new_prefs['followed']) if new_prefs['followed'] else 'None'
+        blocked_str = ", ".join(new_prefs['blocked']) if new_prefs['blocked'] else 'None'
+        
+        msg = (
+            "⚙️ **Your research preferences have been updated!**\n"
+            f"✅ **Prioritized:** {followed_str}\n"
+            f"❌ **Blocked:** {blocked_str}"
+        )
+    except Exception as e:
+        print(f"--> [Config Node] Error updating config: {e}")
+        new_prefs = current_prefs
+        msg = "❌ An error occurred while updating your preferences."
+
+    # Save the updated preferences to the state and set the final message
+    return {"user_preferences": new_prefs, "final_digest": msg}
+
+
+def chat_node(state: AgentState) -> Dict[str, Any]:
+    """
+    Handles casual conversations.
+    """
+    print("--> [Chat Node] Handling chat...")
+    user_input = state.get("user_input", "")
+    
+    llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash-lite", temperature=0.5)
+    messages = [
+        SystemMessage(content="You are a helpful Personal Research Agent. Briefly and politely answer the user's casual chat message."),
+        HumanMessage(content=user_input)
+    ]
+    
+    try:
+        result = llm.invoke(messages)
+        reply = result.content
+    except Exception as e:
+        reply = "Sorry, I am having trouble connecting to my brain right now."
+        
+    return {"final_digest": reply}
