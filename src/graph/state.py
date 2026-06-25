@@ -32,3 +32,6 @@ class AgentState(TypedDict):
     
     # The final consolidated editorial report sent back to the user
     final_digest: str
+    
+    # Store chat history to maintain conversational context
+    chat_history: List[Dict[str, str]]

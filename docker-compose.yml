@@ -1,0 +1,31 @@
+version: '3.8'
+
+services:
+  # Container 1: PostgreSQL Database
+  db:
+    image: postgres:15
+    restart: always
+    environment:
+      POSTGRES_USER: agent_user
+      POSTGRES_PASSWORD: agent_password
+      POSTGRES_DB: agent_db
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+
+  # Container 2: Personal Research Agent Bot
+  bot:
+    build: .
+    restart: always
+    depends_on:
+      - db
+    env_file:
+      - .env
+    environment:
+      # Pass the database connection string to the bot
+      - DATABASE_URI=postgresql://agent_user:agent_password@db:5432/agent_db
+
+# Persist database data even if containers are destroyed
+volumes:
+  postgres_data:

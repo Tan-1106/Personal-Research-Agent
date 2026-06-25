@@ -3,11 +3,10 @@ from src.graph.state                import AgentState
 from src.graph.router               import router_node
 from src.graph.edges                import route_after_router, route_after_filter
 from src.graph.nodes                import scraper_node, filter_node, analyzer_node, editor_node, config_node, chat_node
-from langgraph.checkpoint.memory    import MemorySaver
 from langgraph.graph                import StateGraph, START, END
 
 
-def build_graph():
+def build_graph(checkpointer=None):
     """
     Constructs the LangGraph workflow topology.
     """
@@ -55,9 +54,12 @@ def build_graph():
     workflow.add_edge("config_node", END)
     workflow.add_edge("chat_node", END)
     
-    # 4. Compile the graph with MemorySaver
-    memory = MemorySaver()
-    app = workflow.compile(checkpointer=memory)
+    # 4. Compile the graph with dynamic checkpointer
+    if checkpointer is None:
+        from langgraph.checkpoint.memory import MemorySaver
+        checkpointer = MemorySaver()
+        
+    app = workflow.compile(checkpointer=checkpointer)
     return app
 
 

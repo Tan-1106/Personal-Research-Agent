@@ -14,7 +14,12 @@ requests
 psycopg[binary]
 
 # Environment variables
+pytz
 python-dotenv
 
 # Bot
-python-telegram-bot
+python-telegram-bot[job-queue]
+
+# Database Persistence
+langgraph-checkpoint-postgres
+psycopg-pool

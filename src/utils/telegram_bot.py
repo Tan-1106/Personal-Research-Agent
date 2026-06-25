@@ -1,13 +1,32 @@
 import os
 import pytz
 import datetime
-from src.main       import build_graph
-from telegram       import Update
-from telegram.ext   import Application, CommandHandler, MessageHandler, filters, ContextTypes
+import psycopg_pool
+from src.main                       import build_graph
+from telegram                       import Update
+from telegram.ext                   import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from langgraph.checkpoint.memory    import MemorySaver
+from langgraph.checkpoint.postgres  import PostgresSaver
 
 
-# Initialize the LangGraph application once globally
-graph_app = build_graph()
+# DATABASE INITIALIZATION
+db_uri = os.environ.get("DATABASE_URI")
+
+if db_uri:
+    print("--> [System] Connecting to PostgreSQL...")
+    pool = psycopg_pool.ConnectionPool(
+        conninfo=db_uri,
+        max_size=20,
+        kwargs={"autocommit": True, "prepare_threshold": 0},
+    )
+    checkpointer = PostgresSaver(pool)
+    checkpointer.setup()
+else:
+    print("--> [System] No DATABASE_URI found. Falling back to MemorySaver.")
+    checkpointer = MemorySaver()
+
+# Initialize the LangGraph workflow with the appropriate checkpointer
+graph_app = build_graph(checkpointer=checkpointer)
 
 
 def split_message(text: str, max_length: int = 4000) -> list[str]:

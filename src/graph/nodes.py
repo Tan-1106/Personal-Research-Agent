@@ -7,6 +7,7 @@ from src.utils.scraper_tools                    import scrape_text_from_url
 from langchain_core.messages                    import SystemMessage, HumanMessage
 from langchain_google_genai                     import ChatGoogleGenerativeAI
 from langchain_tavily                           import TavilySearch
+from langchain_core.messages                    import AIMessage
 
 
 def scraper_node(state: AgentState) -> Dict[str, Any]:
@@ -337,10 +338,14 @@ def config_node(state: AgentState) -> Dict[str, Any]:
     structured_llm = llm.with_structured_output(UserPreferences)
     
     system_prompt = (
-        "Extract the user's research preferences from their message. "
-        f"Their current preferences are: {current_prefs}. "
-        "Update the list of followed topics, blocked topics, and preferred language. "
-        "Also generate a confirmation_message in that specific preferred language."
+        "Analyze the user's message regarding their research preferences. "
+        f"Their CURRENT preferences are: {current_prefs}. "
+        "IMPORTANT RULES:\n"
+        "1. VIEW ONLY: If the user is simply asking to see/view their current preferences, return the EXACT SAME topics and language. Do NOT clear them.\n"
+        "2. ADD: If the user wants to add new topics, COMBINE them with the current topics.\n"
+        "3. REMOVE: If the user wants to remove specific topics, delete them from the current list.\n"
+        "4. CLEAR ALL: Only return an empty list if the user explicitly asks to clear, reset, or delete all topics.\n"
+        "Generate a short confirmation_message (in the preferred language) acknowledging what was done (e.g., 'Here are your current settings' or 'Your preferences have been updated')."
     )
     
     messages = [
@@ -383,19 +388,33 @@ def config_node(state: AgentState) -> Dict[str, Any]:
 
 def chat_node(state: AgentState) -> Dict[str, Any]:
     """
-    Handles casual conversations in the preferred language.
+    Handles casual conversations with conversation history memory.
     """
-    print("--> [Chat Node] Handling chat...")
+    print("--> [Chat Node] Handling chat with memory...")
     user_input = state.get("user_input", "")
     
     user_prefs = state.get("user_preferences", {})
     language = user_prefs.get("language", "English")
     
+    # Retrieve the chat history from the state
+    chat_history = state.get("chat_history", [])
+    
     llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash-lite", temperature=0.5)
+    
+    # 1. Initialize the System Prompt
     messages = [
-        SystemMessage(content=f"You are a helpful Personal Research Agent. Briefly and politely answer the user's casual chat message. You MUST reply in this language: {language}"),
-        HumanMessage(content=user_input)
+        SystemMessage(content=f"You are a helpful Personal Research Agent. Briefly and politely answer the user's casual chat message. You MUST reply in this language: {language}")
     ]
+    
+    # 2. Inject previous chat history (limit to the last 10 messages to save tokens)
+    for msg in chat_history[-10:]:
+        if msg["role"] == "user":
+            messages.append(HumanMessage(content=msg["content"]))
+        else:
+            messages.append(AIMessage(content=msg["content"]))
+            
+    # 3. Append the newest user input
+    messages.append(HumanMessage(content=user_input))
     
     try:
         result = llm.invoke(messages)
@@ -404,5 +423,10 @@ def chat_node(state: AgentState) -> Dict[str, Any]:
         sys_msgs = user_prefs.get("system_messages", {})
         reply = sys_msgs.get("connection_error", "Sorry, I am having trouble connecting right now.")
         
-    return {"final_digest": reply}
-
+    # 4. Save the updated history (including the current question and bot response)
+    new_history = chat_history + [
+        {"role": "user", "content": user_input},
+        {"role": "assistant", "content": reply}
+    ]
+        
+    return {"final_digest": reply, "chat_history": new_history}
