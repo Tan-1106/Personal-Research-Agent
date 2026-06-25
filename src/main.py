@@ -1,8 +1,10 @@
-from langgraph.graph    import StateGraph, START, END
-from src.graph.state    import AgentState
-from src.graph.router   import router_node
-from src.graph.edges    import route_after_router
-from src.graph.nodes    import scraper_node, filter_node, analyzer_node, editor_node, config_node, chat_node
+import os
+from src.graph.state                import AgentState
+from src.graph.router               import router_node
+from src.graph.edges                import route_after_router, route_after_filter
+from src.graph.nodes                import scraper_node, filter_node, analyzer_node, editor_node, config_node, chat_node
+from langgraph.checkpoint.memory    import MemorySaver
+from langgraph.graph                import StateGraph, START, END
 
 
 def build_graph():
@@ -36,9 +38,16 @@ def build_graph():
         }
     )
     
-    # The core Research Pipeline: Scrape -> Filter -> Analyze (Map) -> Edit (Reduce)
+    # The core Research Pipeline: Scrape -> Filter -> conditionally retry or Analyze -> Edit
     workflow.add_edge("scraper_node", "filter_node")
-    workflow.add_edge("filter_node", "analyzer_node")
+    workflow.add_conditional_edges(
+        "filter_node",
+        route_after_filter,
+        {
+            "scraper_node": "scraper_node",  # Loop back if not enough articles
+            "analyzer_node": "analyzer_node"  # Proceed when threshold is met
+        }
+    )
     workflow.add_edge("analyzer_node", "editor_node")
     workflow.add_edge("editor_node", END)
     
@@ -46,8 +55,9 @@ def build_graph():
     workflow.add_edge("config_node", END)
     workflow.add_edge("chat_node", END)
     
-    # 4. Compile the graph into an executable application
-    app = workflow.compile()
+    # 4. Compile the graph with MemorySaver
+    memory = MemorySaver()
+    app = workflow.compile(checkpointer=memory)
     return app
 
 

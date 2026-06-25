@@ -15,8 +15,14 @@ class AgentState(TypedDict):
     # Long-term preferences updated by the user (e.g., favorite topics, blocked keywords)
     user_preferences: Dict[str, Any]
     
-    # List of URLs extracted from RSS or Search engine
+    # List of URLs extracted from the current scraping round
     urls: List[str]
+    
+    # Accumulates all URLs visited across retry loops to prevent re-scraping
+    seen_urls: List[str]
+    
+    # Raw articles collected from scraping
+    raw_articles: List[Dict[str, str]]
     
     # Filtered, high-quality content ready for deep analysis
     filtered_articles: List[Dict[str, str]]

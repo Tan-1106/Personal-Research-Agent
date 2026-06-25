@@ -12,33 +12,83 @@ from langchain_tavily                           import TavilySearch
 def scraper_node(state: AgentState) -> Dict[str, Any]:
     """
     Searches the internet using Tavily API based on user input and scrapes the content.
+    Applies followed/blocked preferences intelligently and resets state between queries.
     """
     print("--> [Scraper Node] Initiating search and scrape sequence...")
-    
+
     user_input = state.get("user_input", "")
-    
+    user_prefs = state.get("user_preferences", {})
+    followed = user_prefs.get("followed", [])
+    blocked = user_prefs.get("blocked", [])
+
+    # Load previously visited URLs for this query's retry loop.
+    seen_urls = state.get("seen_urls", [])
+
+    is_first_round = len(seen_urls) == 0
+    if is_first_round:
+        print("    - First round detected. Resetting accumulated state from previous query.")
+
+    search_query = user_input
+    if followed:
+        relevance_llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash-lite", temperature=0.0)
+        relevance_result = relevance_llm.invoke(
+            f"The user has these preferred topics: {', '.join(followed)}.\n"
+            f"User query: \"{user_input}\"\n"
+            f"Is this query a general/open-ended request that should be narrowed down using "
+            f"the preferred topics? Or does the user have a specific subject in mind that is "
+            f"unrelated to the preferred topics?\n"
+            f"Respond with ONLY one word: 'general' or 'specific'."
+        )
+        query_type = relevance_result.content.strip().lower()
+        print(f"    - Query type detected: '{query_type}'")
+
+        if query_type == "general":
+            search_query += f" (focus on: {', '.join(followed)})"
+            print(f"    - Appending followed topics to query.")
+        else:
+            print(f"    - Specific query detected. Skipping followed topics to preserve intent.")
+
+    if blocked:
+        search_query += f" (exclude: {', '.join(blocked)})"
+
+    # Translate the full search intent to English to retrieve diverse global sources,
+    # regardless of the user's preferred display language.
+    print("    - Translating query to English for global sourcing...")
+    translation_llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash-lite", temperature=0.0)
+    translation_result = translation_llm.invoke(
+        f"Translate the following search intent into a concise English search query. "
+        f"Return ONLY the English query string, with no extra explanation or quotes:\n{search_query}"
+    )
+    eng_query = translation_result.content.strip()
+
     # 1. Search Phase using Tavily
-    print(f"    - Querying internet for: '{user_input}'")
-    
-    # Initialize Tavily search tool (returns top 3 most relevant results)
-    search_tool = TavilySearch(max_results=3)
-    
+    print(f"    - Original input   : '{user_input}'")
+    print(f"    - Global query (EN): '{eng_query}'")
+
+    # Escalate max_results on each retry so the search goes deeper every loop iteration.
+    base_max = int(os.environ.get("MAX_SEARCH_RESULTS", 5))
+    current_max = base_max + len(seen_urls)
+    search_tool = TavilySearch(max_results=current_max)
+
     try:
-        # Perform the search and extract URLs
-        search_results = search_tool.invoke({"query": user_input})
-        found_urls = [res["url"] for res in search_results.get("results", [])]
+        # Perform the search using the translated English query
+        search_results = search_tool.invoke({"query": eng_query})
+        all_found_urls = [res["url"] for res in search_results.get("results", [])]
     except Exception as e:
         print(f"    - Search failed: {e}")
-        found_urls = []
-        
-    print(f"    - Found {len(found_urls)} potential URLs.")
-    
+        all_found_urls = []
+
+    # Exclude any URLs that were already scraped in a previous loop iteration.
+    new_urls = [u for u in all_found_urls if u not in seen_urls]
+    updated_seen_urls = seen_urls + new_urls
+    print(f"    - Found {len(new_urls)} new URLs (skipped {len(all_found_urls) - len(new_urls)} already seen).")
+
     # 2. Scrape Phase
     raw_articles = []
-    for url in found_urls:
+    for url in new_urls:
         print(f"    - Scraping content from: {url}")
         content = scrape_text_from_url(url)
-        
+
         if not content.startswith("Error"):
             raw_articles.append({
                 "url": url,
@@ -47,13 +97,15 @@ def scraper_node(state: AgentState) -> Dict[str, Any]:
             print(f"    - Success: Retrieved {len(content)} characters.")
         else:
             print(f"    - Failed: {content}")
-            
+
     print(f"--> [Scraper Node] Completed scraping {len(raw_articles)} articles.")
-    
+
     # 3. Update the AgentState
     return {
-        "urls": found_urls,
-        "filtered_articles": raw_articles
+        "urls": new_urls,
+        "seen_urls": updated_seen_urls,
+        "raw_articles": raw_articles,
+        **({"filtered_articles": []} if is_first_round else {})
     }
     
     
@@ -74,7 +126,30 @@ class UserPreferences(BaseModel):
     topics_to_block: List[str] = Field(
         description="List of topics the user explicitly wants to avoid or block."
     )
-
+    preferred_language: str = Field(
+        description="The full spelling of the preferred language (e.g., 'Vietnamese', NOT 'vi').",
+        default="English"
+    )
+    confirmation_message: str = Field(
+        description="A polite, brief confirmation message (1 sentence) written in the user's preferred language acknowledging the update."
+    )
+    system_messages: Dict[str, str] = Field(
+        description=(
+            "Translate these exact English keys into the user's preferred language. "
+            "Keys must be: "
+            "'thinking' (translating '⏳ Thinking and researching... This might take a minute.'), "
+            "'error' (translating '❌ An error occurred. Please try again.'), "
+            "'morning' (translating '🌅 Good morning! Preparing your daily digest...'), "
+            "'no_results' (translating 'No relevant information found based on your request.'), "
+            "'generation_failed' (translating 'Error occurred while generating the final digest.'), "
+            "'connection_error' (translating 'Sorry, I am having trouble connecting right now.'), "
+            "'lbl_followed' (translating 'Followed'), "
+            "'lbl_blocked' (translating 'Blocked'), "
+            "'lbl_language' (translating 'Language'), "
+            "'lbl_none' (translating 'None')"
+        )
+    )
+    
 
 def filter_node(state: AgentState) -> Dict[str, Any]:
     """
@@ -84,12 +159,15 @@ def filter_node(state: AgentState) -> Dict[str, Any]:
     
     user_input = state.get("user_input", "")
     
-    # Retrieve the raw articles passed down from the Scraper Node
-    raw_articles = state.get("filtered_articles", []) 
+    # Retrieve previously accumulated good articles from prior loops
+    previously_filtered = state.get("filtered_articles", [])
+    
+    # Retrieve the raw articles passed down from the current Scraper Node round
+    raw_articles = state.get("raw_articles", []) 
     
     if not raw_articles:
-        print("    - No articles to filter.")
-        return {"filtered_articles": []}
+        print("    - No new raw articles to filter in this round.")
+        return {"filtered_articles": previously_filtered}
 
     # 2. Initialize the gatekeeper model (Flash-lite for speed and low cost)
     llm = ChatGoogleGenerativeAI(
@@ -103,8 +181,18 @@ def filter_node(state: AgentState) -> Dict[str, Any]:
     prompt_path = os.path.join("src", "prompt", "filter_prompt.txt")
     with open(prompt_path, "r", encoding="utf-8") as file:
         raw_prompt = file.read()
-    system_prompt = raw_prompt.format(user_input=user_input)
+        
+    # Inject preferences into the system prompt
+    user_prefs = state.get("user_preferences", {})
+    followed = user_prefs.get("followed", [])
+    blocked = user_prefs.get("blocked", [])
     
+    system_prompt = raw_prompt.format(
+        user_input=user_input,
+        followed=", ".join(followed) if followed else "None",
+        blocked=", ".join(blocked) if blocked else "None"
+    )
+
     truly_filtered_articles = []
     
     # 3. Iterate and evaluate each article
@@ -131,10 +219,12 @@ def filter_node(state: AgentState) -> Dict[str, Any]:
             print(f"      Evaluation failed: {e}. Keeping article by default.")
             truly_filtered_articles.append(article)
     
-    print(f"--> [Filter Node] Kept {len(truly_filtered_articles)} out of {len(raw_articles)} articles.")
+    # Accumulate the newly accepted articles with the ones from previous rounds
+    accumulated_articles = previously_filtered + truly_filtered_articles
+    print(f"--> [Filter Node] Kept {len(truly_filtered_articles)} out of {len(raw_articles)} new articles. Total accumulated: {len(accumulated_articles)}.")
     
-    # 4. Overwrite the state with only the clean, highly relevant articles
-    return {"filtered_articles": truly_filtered_articles}
+    # 4. Overwrite the state with the combined list
+    return {"filtered_articles": accumulated_articles}
 
 
 def analyzer_node(state: AgentState) -> Dict[str, Any]:
@@ -185,16 +275,22 @@ def analyzer_node(state: AgentState) -> Dict[str, Any]:
 
 def editor_node(state: AgentState) -> Dict[str, Any]:
     """
-    Acts as the Chief Editor. Synthesizes individual analyzed reports 
-    into a final, cohesive Research Digest.
+    Synthesizes individual analyzed reports into a concise, on-topic final digest
+    that directly answers the user's original question.
     """
     print("--> [Editor Node] Synthesizing reports into final digest...")
     
     analyzed_reports = state.get("analyzed_reports", [])
+    user_input = state.get("user_input", "")
+    
+    # Fetch translated system messages for fallback responses
+    user_prefs = state.get("user_preferences", {})
+    language = user_prefs.get("language", "English")
+    sys_msgs = user_prefs.get("system_messages", {})
     
     if not analyzed_reports:
         print("    - No reports to edit.")
-        return {"final_digest": "No relevant information found based on your request."}
+        return {"final_digest": sys_msgs.get("no_results", "No relevant information found based on your request.")}
         
     # Combine all individual reports into a single string for the LLM
     combined_reports = "\n\n".join(analyzed_reports)
@@ -207,7 +303,10 @@ def editor_node(state: AgentState) -> Dict[str, Any]:
     
     prompt_path = os.path.join("src", "prompt", "editor_prompt.txt")
     with open(prompt_path, "r", encoding="utf-8") as file:
-        system_prompt = file.read()
+        raw_prompt = file.read()
+        
+    # Inject both the preferred language and the user's original question into the prompt
+    system_prompt = raw_prompt.format(language=language, user_input=user_input)
         
     messages = [
         SystemMessage(content=system_prompt),
@@ -220,7 +319,7 @@ def editor_node(state: AgentState) -> Dict[str, Any]:
         print("--> [Editor Node] Final digest created successfully.")
     except Exception as e:
         print(f"--> [Editor Node] Failed to create digest: {e}")
-        final_digest = "Error occurred while generating the final digest."
+        final_digest = sys_msgs.get("generation_failed", "Error occurred while generating the final digest.")
         
     # Update state with the final synthesized report
     return {"final_digest": final_digest}
@@ -228,21 +327,20 @@ def editor_node(state: AgentState) -> Dict[str, Any]:
 
 def config_node(state: AgentState) -> Dict[str, Any]:
     """
-    Updates the user's long-term research preferences (follows and blocks).
+    Updates the user's long-term research preferences (follows, blocks, language).
     """
     print("--> [Config Node] Updating user preferences...")
     user_input = state.get("user_input", "")
     current_prefs = state.get("user_preferences", {})
     
-    # We use Flash-lite as this is a fast JSON extraction task
     llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash-lite", temperature=0.0)
     structured_llm = llm.with_structured_output(UserPreferences)
     
     system_prompt = (
         "Extract the user's research preferences from their message. "
         f"Their current preferences are: {current_prefs}. "
-        "Update the list of followed and blocked topics based on their new request. "
-        "Return the updated full list."
+        "Update the list of followed topics, blocked topics, and preferred language. "
+        "Also generate a confirmation_message in that specific preferred language."
     )
     
     messages = [
@@ -254,36 +352,48 @@ def config_node(state: AgentState) -> Dict[str, Any]:
         result = structured_llm.invoke(messages)
         new_prefs = {
             "followed": result.topics_to_follow,
-            "blocked": result.topics_to_block
+            "blocked": result.topics_to_block,
+            "language": result.preferred_language,
+            "system_messages": result.system_messages
         }
+        sys_msgs = result.system_messages
+        lbl_followed = sys_msgs.get("lbl_followed", "Followed")
+        lbl_blocked = sys_msgs.get("lbl_blocked", "Blocked")
+        lbl_lang = sys_msgs.get("lbl_language", "Language")
+        lbl_none = sys_msgs.get("lbl_none", "None")
         
-        followed_str = ", ".join(new_prefs['followed']) if new_prefs['followed'] else 'None'
-        blocked_str = ", ".join(new_prefs['blocked']) if new_prefs['blocked'] else 'None'
+        str_followed = ", ".join(new_prefs["followed"]) if new_prefs["followed"] else lbl_none
+        str_blocked = ", ".join(new_prefs["blocked"]) if new_prefs["blocked"] else lbl_none
         
+        # Assemble the formatted message deterministically
         msg = (
-            "⚙️ **Your research preferences have been updated!**\n"
-            f"✅ **Prioritized:** {followed_str}\n"
-            f"❌ **Blocked:** {blocked_str}"
+            f"⚙️ {result.confirmation_message}\n\n"
+            f"✅ {lbl_followed}: {str_followed}\n"
+            f"❌ {lbl_blocked}: {str_blocked}\n"
+            f"🗣 {lbl_lang}: {new_prefs['language'].title()}"
         )
     except Exception as e:
         print(f"--> [Config Node] Error updating config: {e}")
         new_prefs = current_prefs
-        msg = "❌ An error occurred while updating your preferences."
-
-    # Save the updated preferences to the state and set the final message
+        sys_msgs = current_prefs.get("system_messages", {})
+        msg = sys_msgs.get("error", "❌ An error occurred while updating your preferences.")
+        
     return {"user_preferences": new_prefs, "final_digest": msg}
 
 
 def chat_node(state: AgentState) -> Dict[str, Any]:
     """
-    Handles casual conversations.
+    Handles casual conversations in the preferred language.
     """
     print("--> [Chat Node] Handling chat...")
     user_input = state.get("user_input", "")
     
+    user_prefs = state.get("user_preferences", {})
+    language = user_prefs.get("language", "English")
+    
     llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash-lite", temperature=0.5)
     messages = [
-        SystemMessage(content="You are a helpful Personal Research Agent. Briefly and politely answer the user's casual chat message."),
+        SystemMessage(content=f"You are a helpful Personal Research Agent. Briefly and politely answer the user's casual chat message. You MUST reply in this language: {language}"),
         HumanMessage(content=user_input)
     ]
     
@@ -291,6 +401,8 @@ def chat_node(state: AgentState) -> Dict[str, Any]:
         result = llm.invoke(messages)
         reply = result.content
     except Exception as e:
-        reply = "Sorry, I am having trouble connecting to my brain right now."
+        sys_msgs = user_prefs.get("system_messages", {})
+        reply = sys_msgs.get("connection_error", "Sorry, I am having trouble connecting right now.")
         
     return {"final_digest": reply}
+

@@ -1,5 +1,9 @@
-You are a strict data quality gatekeeper for an AI Research Agent.
 The user is searching for: '{user_input}'.
 
+User's Long-term Preferences:
+- Prioritize topics: {followed}
+- Explicitly block topics: {blocked}
+
 Evaluate the provided article text. Determine if it is genuinely helpful, factual, and relevant to the user's request.
+CRITICAL RULE: If the article discusses any of the explicitly blocked topics, you MUST reject it (is_relevant=False).
 Reject it if it is just a landing page, cookie notice, heavily promotional, clickbait, or off-topic.
